@@ -8,6 +8,7 @@ import ast
 from pathlib import Path
 import gc
 
+import nnsight
 import torch
 from tqdm import tqdm
 
@@ -65,9 +66,11 @@ def train(
     text_encoder.eval()
 
     unet.to(device, dtype=weight_dtype)
-    unet.enable_xformers_memory_efficient_attention()
+    #unet.enable_xformers_memory_efficient_attention()
     unet.requires_grad_(False)
     unet.eval()
+    
+    unet = nnsight.NNsight(unet)
 
     network = LoRANetwork(
         unet,
@@ -190,21 +193,21 @@ def train(
                 noise_scheduler, prompt_pair.batch_size, height, width, 1
             ).to(device, dtype=weight_dtype)
 
-            with network:
-                # ちょっとデノイズされれたものが返る
-                denoised_latents = train_util.diffusion(
-                    unet,
-                    noise_scheduler,
-                    latents,  # 単純なノイズのlatentsを渡す
-                    train_util.concat_embeddings(
-                        prompt_pair.unconditional,
-                        prompt_pair.target,
-                        prompt_pair.batch_size,
-                    ),
-                    start_timesteps=0,
-                    total_timesteps=timesteps_to,
-                    guidance_scale=3,
-                )
+            # ちょっとデノイズされれたものが返る
+            denoised_latents = train_util.diffusion(
+                unet,
+                noise_scheduler,
+                latents,  # 単純なノイズのlatentsを渡す
+                train_util.concat_embeddings(
+                    prompt_pair.unconditional,
+                    prompt_pair.target,
+                    prompt_pair.batch_size,
+                ),
+                start_timesteps=0,
+                total_timesteps=timesteps_to,
+                guidance_scale=3,
+                lora_netwrok=network
+            )
 
             noise_scheduler.set_timesteps(1000)
 
@@ -258,24 +261,24 @@ def train(
                 print("neutral_latents:", neutral_latents[0, 0, :5, :5])
                 print("unconditional_latents:", unconditional_latents[0, 0, :5, :5])
 
-        with network:
-            target_latents = train_util.predict_noise(
-                unet,
-                noise_scheduler,
-                current_timestep,
-                denoised_latents,
-                train_util.concat_embeddings(
-                    prompt_pair.unconditional,
-                    prompt_pair.target,
-                    prompt_pair.batch_size,
-                ),
-                guidance_scale=1,
-            ).to(device, dtype=weight_dtype)
-            
-            #########################
+        target_latents = train_util.predict_noise(
+            unet,
+            noise_scheduler,
+            current_timestep,
+            denoised_latents,
+            train_util.concat_embeddings(
+                prompt_pair.unconditional,
+                prompt_pair.target,
+                prompt_pair.batch_size,
+            ),
+            guidance_scale=1,
+            lora_network=network
+        ).to(device, dtype=weight_dtype)
+        
+        #########################
 
-            if config.logging.verbose:
-                print("target_latents:", target_latents[0, 0, :5, :5])
+        if config.logging.verbose:
+            print("target_latents:", target_latents[0, 0, :5, :5])
 
         positive_latents.requires_grad = False
         neutral_latents.requires_grad = False

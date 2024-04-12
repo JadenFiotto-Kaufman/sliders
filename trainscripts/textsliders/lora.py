@@ -5,7 +5,8 @@
 import os
 import math
 from typing import Optional, List, Type, Set, Literal
-
+import nnsight
+import nnsight.envoy
 import torch
 import torch.nn as nn
 from diffusers import UNet2DConditionModel
@@ -55,7 +56,7 @@ class LoRAModule(nn.Module):
     def __init__(
         self,
         lora_name,
-        org_module: nn.Module,
+        envoy: nnsight.envoy.Envoy,
         multiplier=1.0,
         lora_dim=4,
         alpha=1,
@@ -64,6 +65,10 @@ class LoRAModule(nn.Module):
         super().__init__()
         self.lora_name = lora_name
         self.lora_dim = lora_dim
+        
+        self.envoy = envoy
+        
+        org_module = envoy._module
 
         if "Linear" in org_module.__class__.__name__:
             in_dim = org_module.in_features
@@ -98,24 +103,17 @@ class LoRAModule(nn.Module):
         nn.init.zeros_(self.lora_up.weight)
 
         self.multiplier = multiplier
-        self.org_module = org_module  # remove in applying
 
-    def apply_to(self):
-        self.org_forward = self.org_module.forward
-        self.org_module.forward = self.forward
-        del self.org_module
 
-    def forward(self, x):
-        return (
-            self.org_forward(x)
-            + self.lora_up(self.lora_down(x)) * self.multiplier * self.scale
-        )
+    def __call__(self, scale=1.0):
+
+        self.envoy.output = self.envoy.output + self.lora_up(self.lora_down(self.envoy.input[0][0])) * scale * self.scale
 
 
 class LoRANetwork(nn.Module):
     def __init__(
         self,
-        unet: UNet2DConditionModel,
+        unet: nnsight.NNsight,
         rank: int = 4,
         multiplier: float = 1.0,
         alpha: float = 1.0,
@@ -151,7 +149,6 @@ class LoRANetwork(nn.Module):
 
         # 適用する
         for lora in self.unet_loras:
-            lora.apply_to()
             self.add_module(
                 lora.lora_name,
                 lora,
@@ -164,7 +161,7 @@ class LoRANetwork(nn.Module):
     def create_modules(
         self,
         prefix: str,
-        root_module: nn.Module,
+        root_module: nnsight.NNsight,
         target_replace_modules: List[str],
         rank: int,
         multiplier: float,
@@ -172,7 +169,8 @@ class LoRANetwork(nn.Module):
     ) -> list:
         loras = []
         names = []
-        for name, module in root_module.named_modules():
+        for envoy in root_module._envoy.envoys():
+            name = envoy._module_path
             if train_method == "noxattn" or train_method == "noxattn-hspace" or train_method == "noxattn-hspace-last":  # Cross Attention と Time Embed 以外学習
                 if "attn2" in name or "time_embed" in name:
                     continue
@@ -191,9 +189,10 @@ class LoRANetwork(nn.Module):
                 raise NotImplementedError(
                     f"train_method: {train_method} is not implemented."
                 )
-            if module.__class__.__name__ in target_replace_modules:
-                for child_name, child_module in module.named_modules():
-                    if child_module.__class__.__name__ in ["Linear", "Conv2d", "LoRACompatibleLinear", "LoRACompatibleConv"]:
+            if envoy._module.__class__.__name__ in target_replace_modules:
+                for sub_envoy in envoy._sub_envoys:
+                    if sub_envoy._module.__class__.__name__ in ["Linear", "Conv2d", "LoRACompatibleLinear", "LoRACompatibleConv"]:
+                        child_name = sub_envoy._module_path
                         if train_method == 'xattn-strict':
                             if 'out' in child_name:
                                 continue
@@ -207,7 +206,7 @@ class LoRANetwork(nn.Module):
                         lora_name = lora_name.replace(".", "_")
 #                         print(f"{lora_name}")
                         lora = self.module(
-                            lora_name, child_module, multiplier, rank, self.alpha
+                            lora_name, sub_envoy, multiplier, rank, self.alpha
                         )
 #                         print(name, child_name)
 #                         print(child_module.weight.shape)
@@ -246,13 +245,8 @@ class LoRANetwork(nn.Module):
             save_file(state_dict, file, metadata)
         else:
             torch.save(state_dict, file)
-    def set_lora_slider(self, scale):
-        self.lora_scale = scale
-
-    def __enter__(self):
+            
+    def __call__(self, scale=1.0):
+        
         for lora in self.unet_loras:
-            lora.multiplier = 1.0 * self.lora_scale
-
-    def __exit__(self, exc_type, exc_value, tb):
-        for lora in self.unet_loras:
-            lora.multiplier = 0
+            lora(scale)

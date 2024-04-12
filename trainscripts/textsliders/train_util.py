@@ -148,7 +148,8 @@ def predict_noise(
     timestep: int,  # 現在のタイムステップ
     latents: torch.FloatTensor,
     text_embeddings: torch.FloatTensor,  # uncond な text embed と cond な text embed を結合したもの
-    guidance_scale=7.5,
+    lora_network = None,
+    guidance_scale=7.5
 ) -> torch.FloatTensor:
     # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
     latent_model_input = torch.cat([latents] * 2)
@@ -156,11 +157,15 @@ def predict_noise(
     latent_model_input = scheduler.scale_model_input(latent_model_input, timestep)
 
     # predict the noise residual
-    noise_pred = unet(
-        latent_model_input,
-        timestep,
-        encoder_hidden_states=text_embeddings,
-    ).sample
+    
+    with unet.trace(latent_model_input, timestep, encoder_hidden_states=text_embeddings, scan=False, validate=False):
+        
+        if lora_network is not None:
+            lora_network()
+            
+        noise_pred = unet.output.save()
+                
+    noise_pred = noise_pred.sample
 
     # perform guidance
     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -178,6 +183,7 @@ def diffusion(
     scheduler: SchedulerMixin,
     latents: torch.FloatTensor,  # ただのノイズだけのlatents
     text_embeddings: torch.FloatTensor,
+    lora_netwrok = None,
     total_timesteps: int = 1000,
     start_timesteps=0,
     **kwargs,
